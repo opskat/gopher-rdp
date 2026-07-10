@@ -1,8 +1,10 @@
 package rdp
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"os/user"
 	"runtime"
@@ -25,6 +27,14 @@ type Options struct {
 	// Connection
 	Host string // Target hostname or IP
 	Port int    // Target port (default: 3389)
+
+	// DialContext, when set, is used to establish the transport connection
+	// instead of a direct TCP dial — e.g. to route through an SSH tunnel or
+	// SOCKS proxy. It is invoked for the initial connection and for every
+	// internal re-dial (security-protocol fallback, TLS renegotiation), so it
+	// may be called several times over a session's lifetime. The passed
+	// context carries the dial timeout. nil = direct TCP dial.
+	DialContext func(ctx context.Context, network, addr string) (net.Conn, error)
 
 	// Authentication
 	Username string // Login username

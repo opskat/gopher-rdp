@@ -2,7 +2,8 @@
 // Clipboard Virtual Channel Extension) for bidirectional clipboard
 // support over the "cliprdr" static virtual channel.
 //
-// Supports CF_UNICODETEXT (format ID 13) and CF_DIB (format ID 8).
+// Supports CF_UNICODETEXT, CF_DIB, and streamed file clipboard transfers via
+// FileGroupDescriptorW plus CB_FILECONTENTS_REQUEST/RESPONSE.
 package cliprdr
 
 import (
@@ -10,21 +11,24 @@ import (
 	"encoding/binary"
 	"fmt"
 	"log/slog"
+	"strings"
 
 	"github.com/bouncyball-git/gopher-rdp/util"
 )
 
 // PDU message types (MS-RDPECLIP 2.2.1).
 const (
-	CBMonitorReady       uint16 = 0x0001
-	CBFormatList         uint16 = 0x0002
-	CBFormatListResponse uint16 = 0x0003
-	CBFormatDataRequest  uint16 = 0x0004
-	CBFormatDataResponse uint16 = 0x0005
-	CBTempDirectory      uint16 = 0x0006
-	CBClipCaps           uint16 = 0x0007
-	CBLockClipData       uint16 = 0x000A
-	CBUnlockClipData     uint16 = 0x000B
+	CBMonitorReady         uint16 = 0x0001
+	CBFormatList           uint16 = 0x0002
+	CBFormatListResponse   uint16 = 0x0003
+	CBFormatDataRequest    uint16 = 0x0004
+	CBFormatDataResponse   uint16 = 0x0005
+	CBTempDirectory        uint16 = 0x0006
+	CBClipCaps             uint16 = 0x0007
+	CBFileContentsRequest  uint16 = 0x0008
+	CBFileContentsResponse uint16 = 0x0009
+	CBLockClipData         uint16 = 0x000A
+	CBUnlockClipData       uint16 = 0x000B
 )
 
 // PDU flags.
@@ -88,7 +92,7 @@ func decodePDU(data []byte) (msgType, msgFlags uint16, payload []byte, err error
 // Payload: cCapabilitiesSets(2) + pad(2) + capType(2) + length(2) + version(4) + generalFlags(4).
 func encodeCapsPDU(version, flags uint32) []byte {
 	var payload [16]byte
-	binary.LittleEndian.PutUint16(payload[0:2], 1)                    // cCapabilitiesSets
+	binary.LittleEndian.PutUint16(payload[0:2], 1) // cCapabilitiesSets
 	// payload[2:4] = pad (zero)
 	binary.LittleEndian.PutUint16(payload[4:6], uint16(CBCapsGeneral)) // capType
 	binary.LittleEndian.PutUint16(payload[6:8], 12)                    // length (capType+length+version+flags)
@@ -214,20 +218,25 @@ func encodeFormatDataResponse(ok bool, data []byte) []byte {
 
 // Handler manages the cliprdr protocol over the "cliprdr" static virtual channel.
 type Handler struct {
-	sendFn             func([]byte) error
-	log                *slog.Logger
-	serverCaps         uint32            // generalFlags from server
-	useLongFormatNames bool              // both sides negotiated CB_USE_LONG_FORMAT_NAMES
-	ready              bool              // true after monitor-ready handshake
-	enabled            bool              // runtime toggle; when false, suppress callbacks and outbound data
-	localText          string            // current local clipboard content (UTF-8)
-	localImage         []byte            // current local clipboard image (PNG-encoded)
-	remoteFormats      []FormatListEntry // last format list from server
-	pendingReq         bool              // waiting for FORMAT_DATA_RESPONSE
-	pendingFormat      uint32            // which format was requested (CFUnicodeText or CFDIB)
-	onRemoteCopy       func(hasText, hasImage bool)
-	onTextData         func(text string)
-	onImageData        func(pngData []byte)
+	sendFn                 func([]byte) error
+	log                    *slog.Logger
+	serverCaps             uint32 // generalFlags from server
+	useLongFormatNames     bool   // both sides negotiated CB_USE_LONG_FORMAT_NAMES
+	ready                  bool   // true after monitor-ready handshake
+	enabled                bool   // runtime toggle; when false, suppress callbacks and outbound data
+	localText              string // current local clipboard content (UTF-8)
+	localImage             []byte // current local clipboard image (PNG-encoded)
+	localFiles             []LocalFile
+	fileGroupFormatID      uint32
+	remoteFormats          []FormatListEntry // last format list from server
+	pendingReq             bool              // waiting for FORMAT_DATA_RESPONSE
+	pendingFormat          uint32            // which format was requested (CFUnicodeText or CFDIB)
+	onRemoteCopy           func(hasText, hasImage bool)
+	onTextData             func(text string)
+	onImageData            func(pngData []byte)
+	onRemoteFilesAvailable func()
+	onFileDescriptors      func(files []FileDescriptor)
+	onFileContents         func(streamID uint32, data []byte, err error)
 }
 
 // NewHandler creates a cliprdr handler.
@@ -272,6 +281,14 @@ func (h *Handler) OnImageData(fn func(pngData []byte)) {
 	h.onImageData = fn
 }
 
+func (h *Handler) OnRemoteFilesAvailable(fn func()) { h.onRemoteFilesAvailable = fn }
+
+func (h *Handler) OnFileDescriptors(fn func(files []FileDescriptor)) { h.onFileDescriptors = fn }
+
+func (h *Handler) OnFileContents(fn func(streamID uint32, data []byte, err error)) {
+	h.onFileContents = fn
+}
+
 // ProcessPDU dispatches an incoming cliprdr PDU.
 func (h *Handler) ProcessPDU(data []byte) {
 	msgType, msgFlags, payload, err := decodePDU(data)
@@ -292,6 +309,10 @@ func (h *Handler) ProcessPDU(data []byte) {
 		h.handleFormatDataRequest(payload)
 	case CBFormatDataResponse:
 		h.handleFormatDataResponse(msgFlags, payload)
+	case CBFileContentsRequest:
+		h.handleFileContentsRequest(payload)
+	case CBFileContentsResponse:
+		h.handleFileContentsResponse(msgFlags, payload)
 	case CBLockClipData:
 		var clipDataId uint32
 		if len(payload) >= 4 {
@@ -331,7 +352,7 @@ func (h *Handler) handleMonitorReady() {
 	}
 
 	// Send CB_CLIP_CAPS with our supported flags.
-	clientFlags := CBUseLongFormatNames
+	clientFlags := CBUseLongFormatNames | CBStreamFileclipEnabled | CBFileclipNoFilePaths | CBHugeFileSupportEnabled
 	capsPDU := encodeCapsPDU(CBCapsVersion2, clientFlags)
 	h.log.LogAttrs(context.Background(), slog.LevelDebug, "sending client caps", slog.Int("version", 2), util.Hex8("flags", clientFlags))
 	if err := h.sendFn(capsPDU); err != nil {
@@ -345,10 +366,17 @@ func (h *Handler) handleMonitorReady() {
 // advertisedFormats returns the format list entries to advertise.
 // Always advertise both text and image regardless of current local content.
 func (h *Handler) advertisedFormats() []FormatListEntry {
-	return []FormatListEntry{
+	formats := []FormatListEntry{
 		{FormatID: CFUnicodeText},
 		{FormatID: CFDIB},
 	}
+	if len(h.localFiles) > 0 {
+		if h.fileGroupFormatID == 0 {
+			h.fileGroupFormatID = defaultFileGroupID
+		}
+		formats = append(formats, FormatListEntry{FormatID: h.fileGroupFormatID, FormatName: FileGroupDescriptorW})
+	}
+	return formats
 }
 
 // sendFormatList sends a CB_FORMAT_LIST PDU with our advertised formats.
@@ -394,6 +422,7 @@ func (h *Handler) handleFormatList(payload []byte) {
 
 	hasText := false
 	hasImage := false
+	hasFiles := false
 	for _, f := range h.remoteFormats {
 		switch f.FormatID {
 		case CFUnicodeText:
@@ -401,6 +430,13 @@ func (h *Handler) handleFormatList(payload []byte) {
 		case CFDIB:
 			hasImage = true
 		}
+		if strings.EqualFold(f.FormatName, FileGroupDescriptorW) {
+			hasFiles = true
+		}
+	}
+	if hasFiles && h.onRemoteFilesAvailable != nil {
+		h.onRemoteFilesAvailable()
+		return
 	}
 	if h.onRemoteCopy != nil {
 		h.onRemoteCopy(hasText, hasImage)
@@ -447,6 +483,16 @@ func (h *Handler) handleFormatDataRequest(payload []byte) {
 		if err := h.sendFn(encodeFormatDataResponse(true, dib)); err != nil {
 			h.log.LogAttrs(context.Background(), slog.LevelError, "failed to send data response", slog.Any("error", err))
 		}
+	case formatID == h.fileGroupFormatID && len(h.localFiles) > 0:
+		descriptors, err := encodeFileGroupDescriptorW(h.localFiles)
+		if err != nil {
+			h.log.LogAttrs(context.Background(), slog.LevelError, "encode file descriptors failed", slog.Any("error", err))
+			_ = h.sendFn(encodeFormatDataResponse(false, nil))
+			return
+		}
+		if err := h.sendFn(encodeFormatDataResponse(true, descriptors)); err != nil {
+			h.log.LogAttrs(context.Background(), slog.LevelError, "failed to send file descriptors", slog.Any("error", err))
+		}
 	default:
 		if err := h.sendFn(encodeFormatDataResponse(false, nil)); err != nil {
 			h.log.LogAttrs(context.Background(), slog.LevelError, "failed to send fail response", slog.Any("error", err))
@@ -466,6 +512,19 @@ func (h *Handler) handleFormatDataResponse(flags uint16, payload []byte) {
 
 	// Suppress callback when disabled.
 	if !h.enabled {
+		return
+	}
+
+	remoteFileFormatID := h.remoteFileGroupFormatID()
+	if remoteFileFormatID != 0 && pendingFmt == remoteFileFormatID {
+		files, err := decodeFileGroupDescriptorW(payload)
+		if err != nil {
+			h.log.LogAttrs(context.Background(), slog.LevelError, "decode file descriptors failed", slog.Any("error", err))
+			return
+		}
+		if h.onFileDescriptors != nil {
+			h.onFileDescriptors(files)
+		}
 		return
 	}
 
@@ -495,6 +554,7 @@ func (h *Handler) SetLocalClipboard(text string) error {
 		return nil
 	}
 	h.localText = text
+	h.localFiles = nil
 	return h.sendFn(h.encodeFormatList(h.advertisedFormats()))
 }
 
@@ -505,7 +565,60 @@ func (h *Handler) SetLocalImage(pngData []byte) error {
 		return nil
 	}
 	h.localImage = pngData
+	h.localFiles = nil
 	return h.sendFn(h.encodeFormatList(h.advertisedFormats()))
+}
+
+func (h *Handler) SetLocalFiles(files []LocalFile) error {
+	if !h.enabled {
+		return nil
+	}
+	if _, err := encodeFileGroupDescriptorW(files); err != nil {
+		return err
+	}
+	h.localFiles = append([]LocalFile(nil), files...)
+	h.localText = ""
+	h.localImage = nil
+	if h.fileGroupFormatID == 0 {
+		h.fileGroupFormatID = defaultFileGroupID
+	}
+	return h.sendFn(h.encodeFormatList(h.advertisedFormats()))
+}
+
+func (h *Handler) handleFileContentsRequest(payload []byte) {
+	req, err := decodeFileContentsRequest(payload)
+	if err != nil || !h.enabled || int(req.ListIndex) >= len(h.localFiles) {
+		streamID := uint32(0)
+		if len(payload) >= 4 {
+			streamID = binary.LittleEndian.Uint32(payload[:4])
+		}
+		_ = h.sendFn(encodeFileContentsResponse(streamID, false, nil))
+		return
+	}
+	file := h.localFiles[req.ListIndex]
+	var data []byte
+	switch req.Flags {
+	case FileContentsSize:
+		data = make([]byte, 8)
+		binary.LittleEndian.PutUint64(data, uint64(file.Size))
+	case FileContentsRange:
+		if req.Offset < 0 || req.Offset > file.Size {
+			_ = h.sendFn(encodeFileContentsResponse(req.StreamID, false, nil))
+			return
+		}
+		length := min(int64(req.Requested), file.Size-req.Offset)
+		data, err = file.ReadRange(req.Offset, int(length))
+		if err != nil || len(data) != int(length) {
+			_ = h.sendFn(encodeFileContentsResponse(req.StreamID, false, nil))
+			return
+		}
+	default:
+		_ = h.sendFn(encodeFileContentsResponse(req.StreamID, false, nil))
+		return
+	}
+	if err := h.sendFn(encodeFileContentsResponse(req.StreamID, true, data)); err != nil {
+		h.log.LogAttrs(context.Background(), slog.LevelError, "failed to send file contents", slog.Any("error", err))
+	}
 }
 
 // RequestRemoteText sends a CB_FORMAT_DATA_REQUEST for CF_UNICODETEXT.
@@ -529,4 +642,47 @@ func (h *Handler) RequestRemoteImage() error {
 	h.pendingReq = true
 	h.pendingFormat = CFDIB
 	return h.sendFn(encodeFormatDataRequest(CFDIB))
+}
+
+func (h *Handler) remoteFileGroupFormatID() uint32 {
+	for _, format := range h.remoteFormats {
+		if strings.EqualFold(format.FormatName, FileGroupDescriptorW) {
+			return format.FormatID
+		}
+	}
+	return 0
+}
+
+func (h *Handler) RequestRemoteFiles() error {
+	if !h.enabled {
+		return nil
+	}
+	formatID := h.remoteFileGroupFormatID()
+	if formatID == 0 {
+		return fmt.Errorf("cliprdr: remote clipboard has no files")
+	}
+	h.pendingReq = true
+	h.pendingFormat = formatID
+	return h.sendFn(encodeFormatDataRequest(formatID))
+}
+
+func (h *Handler) RequestRemoteFileRange(listIndex, streamID uint32, offset int64, length uint32) error {
+	if !h.enabled {
+		return nil
+	}
+	return h.sendFn(encodeFileContentsRequest(FileContentsRequest{
+		StreamID: streamID, ListIndex: listIndex, Flags: FileContentsRange, Offset: offset, Requested: length,
+	}))
+}
+
+func (h *Handler) handleFileContentsResponse(flags uint16, payload []byte) {
+	if len(payload) < 4 || h.onFileContents == nil {
+		return
+	}
+	streamID := binary.LittleEndian.Uint32(payload[:4])
+	if flags&CBResponseOK == 0 {
+		h.onFileContents(streamID, nil, fmt.Errorf("cliprdr: remote file contents request failed"))
+		return
+	}
+	h.onFileContents(streamID, append([]byte(nil), payload[4:]...), nil)
 }

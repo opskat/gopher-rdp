@@ -66,9 +66,9 @@ func textFromWire(data []byte) string {
 
 // BITMAPINFOHEADER constants (MS-RDPECLIP, referencing MS-WMF 2.2.2.3).
 const (
-	bihSize   = 40 // sizeof(BITMAPINFOHEADER)
-	biRGB     = 0  // BI_RGB (uncompressed)
-	biBitfields = 3 // BI_BITFIELDS
+	bihSize     = 40 // sizeof(BITMAPINFOHEADER)
+	biRGB       = 0  // BI_RGB (uncompressed)
+	biBitfields = 3  // BI_BITFIELDS
 )
 
 // dibToPNG converts a CF_DIB payload (BITMAPINFOHEADER + pixel data) to PNG.
@@ -177,12 +177,12 @@ func pngToDIB(pngData []byte) ([]byte, error) {
 	dib := make([]byte, bihSize+pixelSize)
 
 	// BITMAPINFOHEADER
-	binary.LittleEndian.PutUint32(dib[0:4], bihSize)         // biSize
-	binary.LittleEndian.PutUint32(dib[4:8], uint32(w))       // biWidth
-	binary.LittleEndian.PutUint32(dib[8:12], uint32(h))      // biHeight (positive = bottom-up)
-	binary.LittleEndian.PutUint16(dib[12:14], 1)             // biPlanes
-	binary.LittleEndian.PutUint16(dib[14:16], 32)            // biBitCount
-	binary.LittleEndian.PutUint32(dib[16:20], biRGB)         // biCompression
+	binary.LittleEndian.PutUint32(dib[0:4], bihSize)             // biSize
+	binary.LittleEndian.PutUint32(dib[4:8], uint32(w))           // biWidth
+	binary.LittleEndian.PutUint32(dib[8:12], uint32(h))          // biHeight (positive = bottom-up)
+	binary.LittleEndian.PutUint16(dib[12:14], 1)                 // biPlanes
+	binary.LittleEndian.PutUint16(dib[14:16], 32)                // biBitCount
+	binary.LittleEndian.PutUint32(dib[16:20], biRGB)             // biCompression
 	binary.LittleEndian.PutUint32(dib[20:24], uint32(pixelSize)) // biSizeImage
 
 	// Write pixels bottom-up as BGRA.
@@ -200,4 +200,3 @@ func pngToDIB(pngData []byte) ([]byte, error) {
 
 	return dib, nil
 }
-

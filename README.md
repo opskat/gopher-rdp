@@ -285,6 +285,7 @@ func (c *Client) State() ConnectionState        // Current state (Disconnected â
 
 ```go
 func (c *Client) SendKeyboard(scancode uint16, pressed bool) error
+func (c *Client) SendKeyboardExtended(scancode uint16, pressed, extended bool) error
 func (c *Client) SendUnicode(codepoint uint16, pressed bool) error
 func (c *Client) SendMouse(x, y int, buttons uint16) error
 func (c *Client) SendMouseWheel(x, y int, delta int, horizontal bool) error

@@ -782,13 +782,13 @@ func TestHandlerImageDataCallback(t *testing.T) {
 	// Create a minimal valid 1x1 24-bit DIB
 	dib := make([]byte, bihSize+4) // 1px row padded to 4 bytes
 	binary.LittleEndian.PutUint32(dib[0:4], bihSize)
-	binary.LittleEndian.PutUint32(dib[4:8], 1)   // width
+	binary.LittleEndian.PutUint32(dib[4:8], 1)    // width
 	binary.LittleEndian.PutUint32(dib[8:12], 1)   // height (bottom-up)
 	binary.LittleEndian.PutUint16(dib[12:14], 1)  // planes
 	binary.LittleEndian.PutUint16(dib[14:16], 24) // bpp
-	dib[bihSize] = 0xFF   // B
-	dib[bihSize+1] = 0x00 // G
-	dib[bihSize+2] = 0x00 // R
+	dib[bihSize] = 0xFF                           // B
+	dib[bihSize+1] = 0x00                         // G
+	dib[bihSize+2] = 0x00                         // R
 
 	var gotPNG []byte
 	h.OnImageData(func(pngData []byte) {

@@ -38,10 +38,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/bouncyball-git/gopher-rdp/util"
-	"github.com/bouncyball-git/gopher-rdp/protocol/nla"
 	"github.com/bouncyball-git/gopher-rdp/protocol/audin"
-	"github.com/bouncyball-git/gopher-rdp/protocol/rdpecam"
 	"github.com/bouncyball-git/gopher-rdp/protocol/ber"
 	"github.com/bouncyball-git/gopher-rdp/protocol/caps"
 	"github.com/bouncyball-git/gopher-rdp/protocol/clearcodec"
@@ -49,25 +46,33 @@ import (
 	"github.com/bouncyball-git/gopher-rdp/protocol/disp"
 	"github.com/bouncyball-git/gopher-rdp/protocol/dvc"
 	"github.com/bouncyball-git/gopher-rdp/protocol/egfx"
-	"github.com/bouncyball-git/gopher-rdp/protocol/mppc"
-	"github.com/bouncyball-git/gopher-rdp/protocol/rdpdr"
-	"github.com/bouncyball-git/gopher-rdp/protocol/rdpsnd"
-	"github.com/bouncyball-git/gopher-rdp/protocol/urbdrc"
 	"github.com/bouncyball-git/gopher-rdp/protocol/fastpath"
 	"github.com/bouncyball-git/gopher-rdp/protocol/lic"
 	"github.com/bouncyball-git/gopher-rdp/protocol/mcs"
+	"github.com/bouncyball-git/gopher-rdp/protocol/mppc"
+	"github.com/bouncyball-git/gopher-rdp/protocol/nla"
 	"github.com/bouncyball-git/gopher-rdp/protocol/nscodec"
 	"github.com/bouncyball-git/gopher-rdp/protocol/orders"
 	"github.com/bouncyball-git/gopher-rdp/protocol/pdu"
 	"github.com/bouncyball-git/gopher-rdp/protocol/pointer"
+	"github.com/bouncyball-git/gopher-rdp/protocol/rdpdr"
+	"github.com/bouncyball-git/gopher-rdp/protocol/rdpecam"
+	"github.com/bouncyball-git/gopher-rdp/protocol/rdpsnd"
 	"github.com/bouncyball-git/gopher-rdp/protocol/rle"
 	"github.com/bouncyball-git/gopher-rdp/protocol/sec"
 	"github.com/bouncyball-git/gopher-rdp/protocol/tpkt"
+	"github.com/bouncyball-git/gopher-rdp/protocol/urbdrc"
 	"github.com/bouncyball-git/gopher-rdp/protocol/x224"
+	"github.com/bouncyball-git/gopher-rdp/util"
 )
 
 // ConnectionState represents the current state of the RDP connection
 type ConnectionState int
+
+// ClipboardFile describes a file offered through the RDP clipboard. File data
+// is read lazily as the server requests ranges.
+type ClipboardFile = cliprdr.LocalFile
+type ClipboardFileDescriptor = cliprdr.FileDescriptor
 
 const (
 	StateDisconnected ConnectionState = iota
@@ -137,8 +142,8 @@ type PointerUpdate struct {
 
 // Client is an RDP client connection
 type Client struct {
-	opts   *Options
-	log    *slog.Logger
+	opts    *Options
+	log     *slog.Logger
 	logTpkt *slog.Logger
 	logNla  *slog.Logger
 	logX224 *slog.Logger
@@ -148,7 +153,7 @@ type Client struct {
 	logPdu  *slog.Logger
 	logFp   *slog.Logger
 	logPtr  *slog.Logger
-	state  ConnectionState
+	state   ConnectionState
 	stateMu sync.RWMutex
 
 	// Network
@@ -164,26 +169,26 @@ type Client struct {
 	credsspVersion   int    // CredSSP version to advertise; 0 = use MaxCredSSPVersion
 
 	// MCS/GCC parameters
-	userChannelID uint16
-	ioChannelID   uint16
-	channelIDs    []uint16
-	channelNames  []string            // ordered, matching channelIDs indices
-	channelMap      map[uint16]string    // channelID → name (built after MCS Connect)
-	channelOpts     map[uint16]uint32   // channelID → channel options
+	userChannelID   uint16
+	ioChannelID     uint16
+	channelIDs      []uint16
+	channelNames    []string                        // ordered, matching channelIDs indices
+	channelMap      map[uint16]string               // channelID → name (built after MCS Connect)
+	channelOpts     map[uint16]uint32               // channelID → channel options
 	channelHandlers map[string]func(uint16, []byte) // name → handler
-	serverCore    *mcs.ServerCoreData
-	serverSec     *mcs.ServerSecurityData
+	serverCore      *mcs.ServerCoreData
+	serverSec       *mcs.ServerSecurityData
 
 	// Standard RDP Security (nil when using TLS)
 	crypto *sec.RDPCrypto
 
 	// Auto-reconnect cookie (MS-RDPBCGR 5.5)
 	arcCookie    *sec.AutoReconnectCookie // set when server sends ARC_SC_PRIVATE_PACKET
-	clientRandom [32]byte                // preserved for HMAC verifier on reconnect
+	clientRandom [32]byte                 // preserved for HMAC verifier on reconnect
 
 	// Dynamic virtual channels (DRDYNVC)
-	dvc           *dvc.Handler
-	onDynChannel  func(name string, ch *dvc.DynChannel)
+	dvc          *dvc.Handler
+	onDynChannel func(name string, ch *dvc.DynChannel)
 
 	// Clipboard (MS-RDPECLIP)
 	clipHandler *cliprdr.Handler
@@ -207,10 +212,10 @@ type Client struct {
 	urbdrcHandler *urbdrc.Handler
 
 	// Display control (MS-RDPEDISP)
-	dispHandler      *disp.Handler
-	pendingResizeW   uint16 // queued resize width (0 = none)
-	pendingResizeH   uint16 // queued resize height
-	pendingMonitors  []disp.MonitorLayout // queued multi-monitor resize (nil = none)
+	dispHandler     *disp.Handler
+	pendingResizeW  uint16               // queued resize width (0 = none)
+	pendingResizeH  uint16               // queued resize height
+	pendingMonitors []disp.MonitorLayout // queued multi-monitor resize (nil = none)
 
 	// Share session
 	shareID    atomic.Uint32
@@ -244,17 +249,17 @@ type Client struct {
 	clipBottom     int
 
 	// Framebuffer and bitmap cache
-	framebufMu  sync.RWMutex       // protects framebuf during resize vs external reads
-	framebuf    *Framebuffer        // client-side screen buffer (bottom-up BGRX)
-	scrBltBuf   []byte              // reusable scratch for ScrBlt overlap
-	clipBuf     []byte              // reusable buffer for sub-rect extraction during clipping
-	bitmapCache     orders.BitmapCache      // bitmap cache (3 caches, value type)
-	brushCache      orders.BrushCache       // brush cache (64 entries, value type)
-	desktopSaveBuf  *orders.DesktopSaveCache // desktop save cache for SaveBitmap orders
+	framebufMu     sync.RWMutex             // protects framebuf during resize vs external reads
+	framebuf       *Framebuffer             // client-side screen buffer (bottom-up BGRX)
+	scrBltBuf      []byte                   // reusable scratch for ScrBlt overlap
+	clipBuf        []byte                   // reusable buffer for sub-rect extraction during clipping
+	bitmapCache    orders.BitmapCache       // bitmap cache (3 caches, value type)
+	brushCache     orders.BrushCache        // brush cache (64 entries, value type)
+	desktopSaveBuf *orders.DesktopSaveCache // desktop save cache for SaveBitmap orders
 
 	// Pointer (cursor) cache and conversion buffer
 	pointerCache [128]*PointerUpdate // matches advertised cache size
-	pointerBuf   []byte             // reusable RGBA conversion buffer
+	pointerBuf   []byte              // reusable RGBA conversion buffer
 
 	// Virtual channel reassembly (chunked VC data from server)
 	vcReassembly      map[uint16][]byte // channelID → accumulated payload
@@ -265,25 +270,28 @@ type Client struct {
 	fragCode byte   // update Code of the in-progress fragment sequence
 
 	// Callbacks (protected by cbMu — use load*/On* methods, not direct access)
-	cbMu            sync.RWMutex
-	onBitmap        func(*BitmapUpdate)
-	onStridedBitmap func(x, y, w, h int, data []byte, stride int)
-	onH264Frame     func(*egfx.H264Frame) // H.264 pass-through callback
-	onBeginPaint func() // called before batch of display updates
-	onEndPaint   func() // called after batch of display updates
-	painting     bool   // true while inside beginPaint/endPaint (reentrant guard)
-	onPointer    func(*PointerUpdate)
-	onResize     func(width, height int)
-	onDisconnect      func(error)
-	onReconnecting    func()
-	onReconnected     func()
-	onClipboardUpdate func(hasText, hasImage bool)
-	onClipboardText   func(text string)
-	onClipboardImage  func(pngData []byte)
-	onAudioData       func(*rdpsnd.AudioSample)
-	onAudioClose      func()
-	onAudioInputOpen  func(audin.AudioFormat)
-	onAudioInputClose func()
+	cbMu                       sync.RWMutex
+	onBitmap                   func(*BitmapUpdate)
+	onStridedBitmap            func(x, y, w, h int, data []byte, stride int)
+	onH264Frame                func(*egfx.H264Frame) // H.264 pass-through callback
+	onBeginPaint               func()                // called before batch of display updates
+	onEndPaint                 func()                // called after batch of display updates
+	painting                   bool                  // true while inside beginPaint/endPaint (reentrant guard)
+	onPointer                  func(*PointerUpdate)
+	onResize                   func(width, height int)
+	onDisconnect               func(error)
+	onReconnecting             func()
+	onReconnected              func()
+	onClipboardUpdate          func(hasText, hasImage bool)
+	onClipboardText            func(text string)
+	onClipboardImage           func(pngData []byte)
+	onClipboardFilesAvailable  func()
+	onClipboardFileDescriptors func(files []ClipboardFileDescriptor)
+	onClipboardFileContents    func(streamID uint32, data []byte, err error)
+	onAudioData                func(*rdpsnd.AudioSample)
+	onAudioClose               func()
+	onAudioInputOpen           func(audin.AudioFormat)
+	onAudioInputClose          func()
 
 	// Audio input silence fill — keeps the AUDIO_INPUT DVC alive while
 	// the browser mic permission prompt is pending.
@@ -328,6 +336,21 @@ func NewClient(opts *Options) (*Client, error) {
 	}, nil
 }
 
+// dialTimeout bounds each transport dial attempt (direct TCP or DialContext).
+const dialTimeout = 10 * time.Second
+
+// dial establishes the transport connection to the target, honoring
+// Options.DialContext when set.
+func (c *Client) dial() (net.Conn, error) {
+	addr := net.JoinHostPort(c.opts.Host, strconv.Itoa(c.opts.Port))
+	if c.opts.DialContext != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), dialTimeout)
+		defer cancel()
+		return c.opts.DialContext(ctx, "tcp", addr)
+	}
+	return net.DialTimeout("tcp", addr, dialTimeout)
+}
+
 // Connect establishes the RDP connection
 func (c *Client) Connect() error {
 	c.setState(StateConnecting)
@@ -336,7 +359,7 @@ func (c *Client) Connect() error {
 	addr := net.JoinHostPort(c.opts.Host, strconv.Itoa(c.opts.Port))
 	c.log.LogAttrs(context.Background(), slog.LevelInfo, "connecting", slog.String("addr", addr))
 
-	conn, err := net.DialTimeout("tcp", addr, 10*time.Second)
+	conn, err := c.dial()
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrConnectionFailed, err)
 	}
@@ -528,8 +551,7 @@ func (c *Client) negotiateX224WithFallback() error {
 		if i > 0 {
 			// Reconnect TCP for the retry — server closed the previous socket.
 			c.conn.Close()
-			addr := net.JoinHostPort(c.opts.Host, strconv.Itoa(c.opts.Port))
-			conn, err := net.DialTimeout("tcp", addr, 10*time.Second)
+			conn, err := c.dial()
 			if err != nil {
 				return fmt.Errorf("%w: reconnect for %s: %v", ErrConnectionFailed, a.label, err)
 			}
@@ -605,7 +627,7 @@ func (c *Client) upgradeTLS() error {
 	c.log.LogAttrs(context.Background(), slog.LevelInfo, "upgrading to TLS")
 
 	tlsConfig := &tls.Config{
-		InsecureSkipVerify: true,            // RDP servers often use self-signed certs
+		InsecureSkipVerify: true, // RDP servers often use self-signed certs
 		ServerName:         c.opts.Host,
 		MinVersion:         tls.VersionTLS10, // Some RDP servers only support TLS 1.0
 	}
@@ -647,8 +669,7 @@ func (c *Client) tryCredSSP() error {
 // constraints. Pass minVer=0,maxVer=0 to use defaults.
 func (c *Client) reconnectWithTLS(x224Protos uint32, minVer, maxVer uint16) error {
 	c.conn.Close()
-	addr := net.JoinHostPort(c.opts.Host, strconv.Itoa(c.opts.Port))
-	conn, err := net.DialTimeout("tcp", addr, 10*time.Second)
+	conn, err := c.dial()
 	if err != nil {
 		return fmt.Errorf("%w: reconnect: %v", ErrConnectionFailed, err)
 	}
@@ -998,8 +1019,8 @@ func (c *Client) mcsConnect() error {
 						BitsPerPixel: 32, TopDown: true, Data: data,
 					}
 					if fn := c.loadOnBitmap(); fn != nil {
-					fn(&c.egfxBitmapUpdate)
-				}
+						fn(&c.egfxBitmapUpdate)
+					}
 				})
 			}
 			c.egfxHandler.OnBeginPaint(func() {
@@ -1207,6 +1228,21 @@ func (c *Client) mcsConnect() error {
 		c.clipHandler.OnImageData(func(pngData []byte) {
 			if fn := c.loadOnClipboardImage(); fn != nil {
 				fn(pngData)
+			}
+		})
+		c.clipHandler.OnRemoteFilesAvailable(func() {
+			if fn := c.loadOnClipboardFilesAvailable(); fn != nil {
+				fn()
+			}
+		})
+		c.clipHandler.OnFileDescriptors(func(files []cliprdr.FileDescriptor) {
+			if fn := c.loadOnClipboardFileDescriptors(); fn != nil {
+				fn(files)
+			}
+		})
+		c.clipHandler.OnFileContents(func(streamID uint32, data []byte, err error) {
+			if fn := c.loadOnClipboardFileContents(); fn != nil {
+				fn(streamID, data, err)
 			}
 		})
 		c.registerChannelHandler("cliprdr", func(_ uint16, data []byte) {
@@ -2089,11 +2125,11 @@ func (c *Client) sendDataPDU(pduType2 uint8, payload []byte) error {
 
 		// Share Data Header (12 bytes)
 		binary.LittleEndian.PutUint32(buf[off+6:off+10], c.shareID.Load())
-		buf[off+10] = 0              // pad1
-		buf[off+11] = pdu.StreamLow  // streamID
+		buf[off+10] = 0             // pad1
+		buf[off+11] = pdu.StreamLow // streamID
 		binary.LittleEndian.PutUint16(buf[off+12:off+14], uint16(payloadLen))
-		buf[off+14] = pduType2       // pduType2
-		buf[off+15] = 0              // compressedType
+		buf[off+14] = pduType2                               // pduType2
+		buf[off+15] = 0                                      // compressedType
 		binary.LittleEndian.PutUint16(buf[off+16:off+18], 0) // compressedLength
 		off += 18
 
@@ -2110,11 +2146,11 @@ func (c *Client) sendDataPDU(pduType2 uint8, payload []byte) error {
 
 		// Share Data Header (12 bytes)
 		binary.LittleEndian.PutUint32(buf[off+6:off+10], c.shareID.Load())
-		buf[off+10] = 0              // pad1
-		buf[off+11] = pdu.StreamLow  // streamID
+		buf[off+10] = 0             // pad1
+		buf[off+11] = pdu.StreamLow // streamID
 		binary.LittleEndian.PutUint16(buf[off+12:off+14], uint16(payloadLen))
-		buf[off+14] = pduType2       // pduType2
-		buf[off+15] = 0              // compressedType
+		buf[off+14] = pduType2                               // pduType2
+		buf[off+15] = 0                                      // compressedType
 		binary.LittleEndian.PutUint16(buf[off+16:off+18], 0) // compressedLength
 		off += 18
 
@@ -4335,7 +4371,7 @@ func (c *Client) executeMem3Blt(s *orders.Mem3BltState) {
 	bgR, bgG, bgB := orders.ColourToRGBA(s.BackColor, c.serverBpp, c.palette())
 
 	// Resolve brush: monochrome pattern, color cache, or solid.
-	var brushMono [8]byte      // monochrome 8x8 pattern (bit=1 → bg, 0 → fg)
+	var brushMono [8]byte        // monochrome 8x8 pattern (bit=1 → bg, 0 → fg)
 	var brushColorData [256]byte // color 8x8 RGBA (stack-local, avoids pointer chase)
 	colorBrush := false
 	solidBrush := false // true = use fg directly as pattern (BS_SOLID)
@@ -4707,7 +4743,7 @@ func (c *Client) handleVirtualChannelData(channelID uint16, data []byte) {
 		// Start of multi-chunk sequence. Cap pre-allocation to avoid
 		// OOM from a malformed totalLength value (untrusted server data).
 		totalLen := binary.LittleEndian.Uint32(data[0:4])
-		const maxVCReassembly = 64 * 1024 * 1024      // 64 MB per channel
+		const maxVCReassembly = 64 * 1024 * 1024        // 64 MB per channel
 		const maxVCReassemblyGlobal = 256 * 1024 * 1024 // 256 MB total
 		if totalLen > maxVCReassembly {
 			c.log.LogAttrs(context.Background(), slog.LevelWarn, "VC reassembly totalLen exceeds limit, dropping",
@@ -5049,7 +5085,6 @@ func (c *Client) setState(state ConnectionState) {
 	c.stateMu.Unlock()
 }
 
-
 // callback loaders — read under cbMu.RLock for concurrent access from any goroutine.
 
 func (c *Client) loadOnBitmap() func(*BitmapUpdate) {
@@ -5146,6 +5181,27 @@ func (c *Client) loadOnClipboardText() func(text string) {
 func (c *Client) loadOnClipboardImage() func(pngData []byte) {
 	c.cbMu.RLock()
 	fn := c.onClipboardImage
+	c.cbMu.RUnlock()
+	return fn
+}
+
+func (c *Client) loadOnClipboardFilesAvailable() func() {
+	c.cbMu.RLock()
+	fn := c.onClipboardFilesAvailable
+	c.cbMu.RUnlock()
+	return fn
+}
+
+func (c *Client) loadOnClipboardFileDescriptors() func(files []ClipboardFileDescriptor) {
+	c.cbMu.RLock()
+	fn := c.onClipboardFileDescriptors
+	c.cbMu.RUnlock()
+	return fn
+}
+
+func (c *Client) loadOnClipboardFileContents() func(streamID uint32, data []byte, err error) {
+	c.cbMu.RLock()
+	fn := c.onClipboardFileContents
 	c.cbMu.RUnlock()
 	return fn
 }
@@ -5321,6 +5377,24 @@ func (c *Client) OnClipboardImage(fn func(pngData []byte)) {
 	c.cbMu.Unlock()
 }
 
+func (c *Client) OnClipboardFilesAvailable(fn func()) {
+	c.cbMu.Lock()
+	c.onClipboardFilesAvailable = fn
+	c.cbMu.Unlock()
+}
+
+func (c *Client) OnClipboardFileDescriptors(fn func(files []ClipboardFileDescriptor)) {
+	c.cbMu.Lock()
+	c.onClipboardFileDescriptors = fn
+	c.cbMu.Unlock()
+}
+
+func (c *Client) OnClipboardFileContents(fn func(streamID uint32, data []byte, err error)) {
+	c.cbMu.Lock()
+	c.onClipboardFileContents = fn
+	c.cbMu.Unlock()
+}
+
 // OnAudioData sets the callback invoked when decoded PCM audio arrives
 // from the server via the rdpsnd channel.
 func (c *Client) OnAudioData(fn func(*rdpsnd.AudioSample)) {
@@ -5431,6 +5505,15 @@ func (c *Client) SetClipboardImage(pngData []byte) error {
 	return c.clipHandler.SetLocalImage(pngData)
 }
 
+// SetClipboardFiles offers files to the server through MS-RDPECLIP. The
+// server requests descriptors and contents lazily when the user pastes.
+func (c *Client) SetClipboardFiles(files []ClipboardFile) error {
+	if c.clipHandler == nil {
+		return ErrNotConnected
+	}
+	return c.clipHandler.SetLocalFiles(files)
+}
+
 // RequestClipboard sends a request to the server for its clipboard text.
 // The result is delivered asynchronously via the OnClipboardText callback.
 func (c *Client) RequestClipboard() error {
@@ -5449,6 +5532,20 @@ func (c *Client) RequestClipboardImage() error {
 	return c.clipHandler.RequestRemoteImage()
 }
 
+func (c *Client) RequestClipboardFiles() error {
+	if c.clipHandler == nil {
+		return ErrNotConnected
+	}
+	return c.clipHandler.RequestRemoteFiles()
+}
+
+func (c *Client) RequestClipboardFileRange(listIndex, streamID uint32, offset int64, length uint32) error {
+	if c.clipHandler == nil {
+		return ErrNotConnected
+	}
+	return c.clipHandler.RequestRemoteFileRange(listIndex, streamID, offset, length)
+}
+
 // Done returns a channel that is closed when the connection ends,
 // whether by explicit Close() or unexpected disconnect.
 func (c *Client) Done() <-chan struct{} {
@@ -5458,14 +5555,28 @@ func (c *Client) Done() <-chan struct{} {
 	return done
 }
 
-// SendKeyboard sends a keyboard event
+// SendKeyboard sends a keyboard scancode event for a non-extended key.
 func (c *Client) SendKeyboard(scancode uint16, pressed bool) error {
+	return c.SendKeyboardExtended(scancode, pressed, false)
+}
+
+// SendKeyboardExtended sends a keyboard scancode event, marking it as an
+// extended key when extended is true. Extended (E0-prefixed set-1) keys — the
+// arrow cluster, Insert/Home/End/PageUp/PageDown/Delete, right Ctrl/Alt, and
+// numpad Enter/'/' — are distinguished on the wire by KBDFLAGS_EXTENDED
+// (0x0100) in the event flags, not by the scancode value (MS-RDPBCGR
+// 2.2.8.1.1.3.1.1.1). Pass the base scancode (e.g. 0x48 for Up) with
+// extended=true.
+func (c *Client) SendKeyboardExtended(scancode uint16, pressed, extended bool) error {
 	if c.State() != StateConnected {
 		return ErrNotConnected
 	}
 	flags := uint16(0)
 	if !pressed {
 		flags |= pdu.KbdFlagsRelease
+	}
+	if extended {
+		flags |= pdu.KbdFlagsExtended
 	}
 	// Stack-allocated: input header (4) + scancode event (12) = 16 bytes
 	var buf [pdu.InputPDUHeaderSize + pdu.ScancodeEventSize]byte

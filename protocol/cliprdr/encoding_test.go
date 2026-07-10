@@ -15,8 +15,8 @@ func TestEncodeDecodeUTF16LE(t *testing.T) {
 		input string
 	}{
 		{"ASCII", "hello"},
-		{"CJK", "\u4f60\u597d"},       // 你好
-		{"emoji", "\U0001F600"},        // 😀 (surrogate pair)
+		{"CJK", "\u4f60\u597d"}, // 你好
+		{"emoji", "\U0001F600"}, // 😀 (surrogate pair)
 		{"mixed", "Hi 你好 \U0001F600"},
 		{"empty", ""},
 	}
@@ -137,11 +137,11 @@ func TestDibToPNG_24bit(t *testing.T) {
 	// Bottom row (y=1 in image) first, then top row (y=0 in image).
 	// Row 0 in DIB (bottom of image): blue, green
 	off := bihSize
-	dib[off], dib[off+1], dib[off+2] = 0xFF, 0x00, 0x00 // pixel(0,1) = B=FF, G=00, R=00 → blue
+	dib[off], dib[off+1], dib[off+2] = 0xFF, 0x00, 0x00   // pixel(0,1) = B=FF, G=00, R=00 → blue
 	dib[off+3], dib[off+4], dib[off+5] = 0x00, 0xFF, 0x00 // pixel(1,1) = B=00, G=FF, R=00 → green
 	// Row 1 in DIB (top of image): red, white
 	off = bihSize + rowBytes
-	dib[off], dib[off+1], dib[off+2] = 0x00, 0x00, 0xFF // pixel(0,0) = B=00, G=00, R=FF → red
+	dib[off], dib[off+1], dib[off+2] = 0x00, 0x00, 0xFF   // pixel(0,0) = B=00, G=00, R=FF → red
 	dib[off+3], dib[off+4], dib[off+5] = 0xFF, 0xFF, 0xFF // pixel(1,0) = white
 
 	pngData, err := dibToPNG(dib)
