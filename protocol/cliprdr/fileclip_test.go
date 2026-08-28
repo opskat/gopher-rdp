@@ -76,6 +76,21 @@ func TestLocalFileDescriptorAndContentsAreStreamed(t *testing.T) {
 	}
 }
 
+func TestLocalFileDescriptorRequestsNativeShellProgressUI(t *testing.T) {
+	descriptors, err := encodeFileGroupDescriptorW([]LocalFile{{
+		Name: "large.iso", Size: 8 << 30, ModTime: time.Unix(1_700_000_000, 0),
+		ReadRange: func(int64, int) ([]byte, error) { return nil, nil },
+	}})
+	if err != nil {
+		t.Fatalf("encodeFileGroupDescriptorW: %v", err)
+	}
+
+	flags := binary.LittleEndian.Uint32(descriptors[4:8])
+	if flags&fdProgressUI == 0 {
+		t.Fatalf("descriptor flags = %#08x, want FD_PROGRESSUI", flags)
+	}
+}
+
 func TestRemoteFileDescriptorsAndRangesAreDelivered(t *testing.T) {
 	var sent [][]byte
 	h := NewHandler(func(data []byte) error {

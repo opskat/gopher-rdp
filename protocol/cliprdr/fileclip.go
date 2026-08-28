@@ -21,6 +21,7 @@ const (
 	fdAttributes           = uint32(0x00000004)
 	fdWriteTime            = uint32(0x00000020)
 	fdFileSize             = uint32(0x00000040)
+	fdProgressUI           = uint32(0x00004000)
 	fileAttributeNormal    = uint32(0x00000080)
 	fileAttributeDirectory = uint32(0x00000010)
 )
@@ -99,7 +100,7 @@ func encodeFileGroupDescriptorW(files []LocalFile) ([]byte, error) {
 			return nil, err
 		}
 		d := payload[4+i*fileDescriptorSize : 4+(i+1)*fileDescriptorSize]
-		binary.LittleEndian.PutUint32(d[0:4], fdAttributes|fdWriteTime|fdFileSize)
+		binary.LittleEndian.PutUint32(d[0:4], fdAttributes|fdWriteTime|fdFileSize|fdProgressUI)
 		binary.LittleEndian.PutUint32(d[36:40], fileAttributeNormal)
 		binary.LittleEndian.PutUint64(d[56:64], windowsFileTime(file.ModTime))
 		binary.LittleEndian.PutUint32(d[64:68], uint32(uint64(file.Size)>>32))
