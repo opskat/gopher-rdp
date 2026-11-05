@@ -5861,6 +5861,31 @@ func (c *Client) FramebufferWriteTopDown(dst []byte) (int, int) {
 	return w, h
 }
 
+// FramebufferWriteRectTopDown writes the rectangle (x, y, w, h), given in
+// top-down coordinates, as top-down RGBA rows of w*4 bytes into dst, copying
+// only that region instead of the whole screen. Returns the framebuffer
+// (width, height) so callers can detect a resize since they computed the
+// rectangle. Returns (0, 0) if no framebuffer exists, the rectangle is empty
+// or not fully inside the framebuffer, or dst is smaller than w*h*4 bytes.
+func (c *Client) FramebufferWriteRectTopDown(dst []byte, x, y, w, h int) (int, int) {
+	c.framebufMu.RLock()
+	defer c.framebufMu.RUnlock()
+	if c.framebuf == nil {
+		return 0, 0
+	}
+	fbW, fbH := c.framebuf.Width, c.framebuf.Height
+	if w <= 0 || h <= 0 || x < 0 || y < 0 || x+w > fbW || y+h > fbH || len(dst) < w*h*4 {
+		return 0, 0
+	}
+	stride := c.framebuf.Stride
+	rowLen := w * 4
+	for row := 0; row < h; row++ {
+		srcOff := (fbH-1-(y+row))*stride + x*4
+		copy(dst[row*rowLen:(row+1)*rowLen], c.framebuf.Pixels[srcOff:srcOff+rowLen])
+	}
+	return fbW, fbH
+}
+
 func (c *Client) DumpFramebuffer() (string, error) {
 	c.framebufMu.RLock()
 	if c.framebuf == nil {
